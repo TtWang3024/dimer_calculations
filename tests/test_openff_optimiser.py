@@ -1,4 +1,4 @@
-"""Tests for the OpenMM optimiser. Skipped when OpenMM or OpenFF is missing."""
+"""Tests for the OpenFF optimiser. Skipped when OpenMM or OpenFF is missing."""
 
 import pathlib
 
@@ -18,8 +18,8 @@ from dimer_calculations.axes import (
 from dimer_calculations.cage import Cage
 from dimer_calculations.dimer_generator import DimerGenerator
 from dimer_calculations.optimiser_functions import (
-    OpenMMDimer,
-    optimise_dimer_openmm,
+    OpenFFDimer,
+    optimise_dimer_openff,
 )
 from dimer_calculations.utils import remove_aldehyde
 
@@ -63,28 +63,28 @@ def dimer() -> stk.Molecule:
     return dimers[0]["Dimer"]
 
 
-def test_optimise_dimer_openmm_writes_the_optimised_dimer(
+def test_optimise_dimer_openff_writes_the_optimised_dimer(
     dimer: stk.Molecule, tmp_path: pathlib.Path
 ) -> None:
     """The optimised dimer and its energies are written."""
-    output_dir = tmp_path / "OpenMM_shell_0"
-    optimise_dimer_openmm(
-        dimer=dimer, output_dir=str(output_dir), max_iterations=200
-    )
+    output_dir = tmp_path / "OpenFF_shell_0"
+    optimise_dimer_openff(dimer=dimer, output_dir=str(output_dir))
 
     optimised = stk.BuildingBlock.init_from_file(
-        tmp_path / "OpenMM_shell_0_opt.mol"
+        tmp_path / "OpenFF_shell_0_opt.mol"
     )
     assert optimised.get_num_atoms() == dimer.get_num_atoms()
     assert not np.allclose(
         optimised.get_position_matrix(), dimer.get_position_matrix()
     )
 
-    lines = (output_dir / "openmm_opt.out").read_text().splitlines()
+    lines = (output_dir / "openff_opt.out").read_text().splitlines()
     values = dict(line.split(": ") for line in lines)
     assert float(values["final_energy_kJ_mol"]) < float(
         values["initial_energy_kJ_mol"]
     )
+    assert values["status"] == "converged"
+    assert float(values["rms_force_free_atoms_kJ_mol_nm"]) <= 10.0
 
 
 def test_fixed_atoms_keep_their_positions(dimer: stk.Molecule) -> None:
@@ -92,7 +92,7 @@ def test_fixed_atoms_keep_their_positions(dimer: stk.Molecule) -> None:
     fixed_atom_set = Cage.fix_atom_set(dimer, "NCCN")
     assert fixed_atom_set
 
-    optimised = OpenMMDimer(max_iterations=200).optimize(
+    optimised = OpenFFDimer().optimize(
         mol=dimer, fixed_atom_set=fixed_atom_set
     )
     shift = np.linalg.norm(
@@ -109,10 +109,10 @@ def test_a_finished_dimer_is_skipped(
     dimer: stk.Molecule, tmp_path: pathlib.Path
 ) -> None:
     """An existing ``_opt.mol`` is left untouched."""
-    output_dir = tmp_path / "OpenMM_shell_0"
-    done = tmp_path / "OpenMM_shell_0_opt.mol"
+    output_dir = tmp_path / "OpenFF_shell_0"
+    done = tmp_path / "OpenFF_shell_0_opt.mol"
     done.write_text("finished earlier")
-    optimise_dimer_openmm(dimer=dimer, output_dir=str(output_dir))
+    optimise_dimer_openff(dimer=dimer, output_dir=str(output_dir))
     assert done.read_text() == "finished earlier"
 
 
@@ -121,6 +121,22 @@ def test_fixed_atom_ids_outside_the_dimer_are_rejected(
 ) -> None:
     """A wrong atom id raises an error instead of being ignored."""
     with pytest.raises(ValueError, match="outside"):
-        OpenMMDimer().optimize(
+        OpenFFDimer().optimize(
             mol=dimer, fixed_atom_set=[dimer.get_num_atoms()]
         )
+
+
+def test_iteration_limit_is_not_reported_as_success(
+    dimer: stk.Molecule, tmp_path: pathlib.Path
+) -> None:
+    """A stopped optimisation retains diagnostics but no completed result."""
+    output_dir = tmp_path / "unfinished"
+    with pytest.raises(RuntimeError, match="did not converge"):
+        optimise_dimer_openff(
+            dimer=dimer,
+            output_dir=str(output_dir),
+            max_iterations=1,
+            tolerance=1e-8,
+        )
+    assert not pathlib.Path(f"{output_dir}_opt.mol").exists()
+    assert "status: unconverged" in (output_dir / "openff_opt.out").read_text()

@@ -11,7 +11,7 @@ The package can:
   geometric midpoints;
 - generate displaced, rotated, and optionally laterally shifted dimers;
 - reject configurations with atomic overlap or cage catenation; and
-- optimise accepted dimers with xTB, GULP, MacroModel, or OpenMM.
+- optimise accepted dimers with xTB, GULP, MacroModel, or OpenFF using OpenMM.
 
 ## Installation
 
@@ -61,9 +61,9 @@ The resolved values are available as `XTB_PATH`, `GULP_PATH`, and
 `SCHRODINGER_PATH` from `dimer_calculations.config`. Optimiser functions also
 accept executable paths directly.
 
-## OpenMM
+## OpenFF using OpenMM
 
-`optimise_dimer_openmm` optimises a dimer with an
+`optimise_dimer_openff` optimises a dimer with an
 [OpenFF](https://openforcefield.org/) force field in
 [OpenMM](https://openmm.org/). It runs inside Python, so it needs no
 executable path, but the OpenFF packages are installed from conda-forge:
@@ -76,8 +76,13 @@ conda install -c conda-forge openmm openff-toolkit openff-interchange \
 The default force field, Sage 2.3.0 (`openff_unconstrained-2.3.0.offxml`),
 assigns partial charges with NAGL in seconds. Like the other optimisers, it
 writes the optimised dimer to `{output_dir}_opt.mol`, and
-`{output_dir}/openmm_opt.out` records the energy before and after
-optimisation.
+`{output_dir}/openff_opt.out` records the energy before and after
+optimisation, the final free-atom RMS force and convergence status. Use an
+unconstrained force field so that this force check is meaningful.
+
+An unconverged or non-finite result raises `RuntimeError` without writing
+`_opt.mol`. Existing `_opt.mol` files are skipped; use a new output path
+when changing the molecule or settings.
 
 Atoms in `fixed_atom_set` keep their positions, which holds the two cages at
 the intended offset. Atom ids count from 0, as `Cage.fix_atom_set` returns
@@ -87,14 +92,14 @@ them:
 from dimer_calculations import cage, optimiser_functions
 
 fixed_atom_set = cage.Cage.fix_atom_set(dimer, "NCCN", metal_atom=None)
-optimiser_functions.optimise_dimer_openmm(
+optimiser_functions.optimise_dimer_openff(
     dimer=dimer,
-    output_dir="OpenMM_shell_0_slide_0_rot_0",
+    output_dir="OpenFF_shell_0_slide_0_rot_0",
     fixed_atom_set=fixed_atom_set,
 )
 ```
 
-This has been tested with OpenMM 8.2, OpenFF Toolkit 0.18, OpenFF Interchange
+This has been tested with OpenMM 8.6, OpenFF Toolkit 0.18, OpenFF Interchange
 0.5 and OpenFF NAGL 0.5.
 
 ## Basic workflow

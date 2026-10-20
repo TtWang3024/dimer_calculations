@@ -428,7 +428,7 @@ class GulpDimer(stko.GulpUFFOptimizer):
             f.write(output_section)
 
 
-class OpenMMDimer:
+class OpenFFDimer:
     """Optimise a molecule with an OpenFF force field in OpenMM.
 
     This needs the ``openmm``, ``openff-toolkit`` and
@@ -452,11 +452,11 @@ class OpenMMDimer:
         ----------
         force_field:
             An OpenFF force field. Sage 2.3.0, the default, assigns
-            partial charges with NAGL in seconds. Fixed atoms need a force
-            field without constraints, such as the default.
+            partial charges with NAGL in seconds. The force-based convergence
+            check requires a force field without constraints.
 
         output_dir:
-            Directory for ``openmm_opt.out``, which records the energy
+            Directory for ``openff_opt.out``, which records the energy
             before and after optimisation. Nothing is written if ``None``.
 
         max_iterations:
@@ -518,6 +518,9 @@ class OpenMMDimer:
                 f"fixed_atom_set has ids outside 0-{num_atoms - 1}: {outside}"
             )
             raise ValueError(msg)
+        if len(fixed) == num_atoms:
+            msg = "At least one atom must be free to optimise"
+            raise ValueError(msg)
 
         # One OpenFF molecule per cage; ``order[k]`` is the atom id of
         # OpenMM particle ``k``.
@@ -541,6 +544,12 @@ class OpenMMDimer:
         system = Interchange.from_smirnoff(
             force_field=ForceField(self._force_field), topology=topology
         ).to_openmm_system()
+        if system.getNumConstraints():
+            msg = (
+                "Use an unconstrained OpenFF force field: convergence is "
+                "checked using the forces on free atoms."
+            )
+            raise ValueError(msg)
         # OpenMM does not move particles with zero mass.
         for particle, atom_id in enumerate(order):
             if atom_id in fixed:
@@ -572,45 +581,45 @@ class OpenMMDimer:
         positions[order] = state.getPositions(asNumpy=True).value_in_unit(
             unit.angstrom
         )
+        forces = state.getForces(asNumpy=True).value_in_unit(
+            unit.kilojoule_per_mole / unit.nanometer
+        )
+        free = [k for k, atom_id in enumerate(order) if atom_id not in fixed]
+        rms_force = float(np.sqrt(np.mean(forces[free] ** 2)))
+        initial_energy = initial.value_in_unit(unit.kilojoule_per_mole)
+        final_energy = state.getPotentialEnergy().value_in_unit(
+            unit.kilojoule_per_mole
+        )
+        converged = bool(
+            np.isfinite(positions).all()
+            and np.isfinite(forces).all()
+            and np.isfinite([initial_energy, final_energy, rms_force]).all()
+            and rms_force <= self._tolerance
+        )
         if self._output_dir is not None:
-            forces = state.getForces(asNumpy=True).value_in_unit(
-                unit.kilojoule_per_mole / unit.nanometer
+            output_dir = pathlib.Path(self._output_dir)
+            output_dir.mkdir(parents=True, exist_ok=True)
+            result = {
+                "status": "converged" if converged else "unconverged",
+                "force_field": self._force_field,
+                "atoms": num_atoms,
+                "fixed_atoms": len(fixed),
+                "initial_energy_kJ_mol": initial_energy,
+                "final_energy_kJ_mol": final_energy,
+                "rms_force_free_atoms_kJ_mol_nm": rms_force,
+                "tolerance_kJ_mol_nm": self._tolerance,
+            }
+            (output_dir / "openff_opt.out").write_text(
+                "".join(f"{key}: {value}\n" for key, value in result.items())
             )
-            free = [
-                k for k, atom_id in enumerate(order) if atom_id not in fixed
-            ]
-            rms_force = float(np.sqrt(np.mean(forces[free] ** 2)))
-            final = state.getPotentialEnergy()
-            self._write_output(
-                num_atoms=num_atoms,
-                num_fixed=len(fixed),
-                initial=initial.value_in_unit(unit.kilojoule_per_mole),
-                final=final.value_in_unit(unit.kilojoule_per_mole),
-                rms_force=rms_force,
+        if not converged:
+            msg = (
+                "OpenFF optimisation did not converge: free-atom RMS force "
+                f"{rms_force:.6g} kJ/mol/nm exceeds tolerance "
+                f"{self._tolerance:.6g}, or the result is non-finite."
             )
+            raise RuntimeError(msg)
         return mol.with_position_matrix(positions)
-
-    def _write_output(
-        self,
-        *,
-        num_atoms: int,
-        num_fixed: int,
-        initial: float,
-        final: float,
-        rms_force: float,
-    ) -> None:
-        output_dir = pathlib.Path(str(self._output_dir))
-        output_dir.mkdir(parents=True, exist_ok=True)
-        lines = [
-            f"force_field: {self._force_field}",
-            f"atoms: {num_atoms}",
-            f"fixed_atoms: {num_fixed}",
-            f"initial_energy_kJ_mol: {initial:.6f}",
-            f"final_energy_kJ_mol: {final:.6f}",
-            f"rms_force_free_atoms_kJ_mol_nm: {rms_force:.4f}",
-            f"tolerance_kJ_mol_nm: {self._tolerance}",
-        ]
-        (output_dir / "openmm_opt.out").write_text("\n".join(lines) + "\n")
 
 
 def optimise_dimer_gulp(dimer, output_dir, gulp_path, fixed_atom_set=None):
@@ -712,7 +721,7 @@ def optimise_dimer_XTB(
         structure.write(f"{output_dir}_opt.mol")
 
 
-def optimise_dimer_openmm(  # noqa: PLR0913
+def optimise_dimer_openff(  # noqa: PLR0913
     dimer: stk.Molecule,
     output_dir: str,
     *,
@@ -723,19 +732,19 @@ def optimise_dimer_openmm(  # noqa: PLR0913
     num_cores: int = 1,
     fixed_atom_set: list[int] | None = None,
 ) -> None:
-    """Optimise ``dimer`` with OpenMM and write ``{output_dir}_opt.mol``.
+    """Optimise ``dimer`` with OpenFF and write ``{output_dir}_opt.mol``.
 
-    ``output_dir/openmm_opt.out`` records the energies before and after
+    ``output_dir/openff_opt.out`` records the energies before and after
     optimisation. A dimer whose ``_opt.mol`` already exists is skipped. The
-    other arguments are those of :class:`OpenMMDimer` and its
-    :meth:`~OpenMMDimer.optimize`.
+    other arguments are those of :class:`OpenFFDimer` and its
+    :meth:`~OpenFFDimer.optimize`.
     """
     output_file = pathlib.Path(f"{output_dir}_opt.mol")
     if output_file.exists():
         logger.info("Skipping dimer %s as it is already done", output_dir)
         return
 
-    openmm_opt = OpenMMDimer(
+    openff_opt = OpenFFDimer(
         force_field=force_field,
         output_dir=output_dir,
         max_iterations=max_iterations,
@@ -743,5 +752,5 @@ def optimise_dimer_openmm(  # noqa: PLR0913
         platform=platform,
         num_cores=num_cores,
     )
-    structure = openmm_opt.optimize(mol=dimer, fixed_atom_set=fixed_atom_set)
+    structure = openff_opt.optimize(mol=dimer, fixed_atom_set=fixed_atom_set)
     structure.write(str(output_file))
